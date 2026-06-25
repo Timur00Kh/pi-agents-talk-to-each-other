@@ -1,0 +1,23 @@
+{
+  "name": "pi-agents-talk-to-each-other",
+  "version": "0.1.0",
+  "description": "A Pi extension that lets local Pi agents join rooms, see each other, and send tasks/messages.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "multi-agent",
+    "agent-room"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./extensions/agent-room/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}
