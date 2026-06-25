@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const EXTENSION_VERSION = "0.3.0";
+const EXTENSION_VERSION = "0.3.1";
 const HEARTBEAT_MS = 2_000;
 const INBOX_POLL_MS = 1_000;
 const ACTIVE_TTL_MS = 30_000;
@@ -63,6 +63,7 @@ interface RoomMessage {
   action?: ControlAction;
   instructions?: string;
   kickoff?: string;
+  delivery?: "steer" | "followUp";
 }
 
 interface RuntimeState {
@@ -334,7 +335,7 @@ function enqueueMessage(room: string, message: RoomMessage): void {
   appendJsonLine(path.join(roomDir(room), "events.jsonl"), { type: "enqueue", ...message });
 }
 
-function createUserMessage(room: string, to: string, text: string): RoomMessage {
+function createUserMessage(room: string, to: string, text: string, delivery?: "steer" | "followUp"): RoomMessage {
   return {
     id: makeId("msg"),
     kind: "message",
@@ -342,6 +343,7 @@ function createUserMessage(room: string, to: string, text: string): RoomMessage 
     from: AGENT_ID,
     to,
     text,
+    delivery,
     createdAt: Date.now(),
   };
 }
@@ -491,8 +493,14 @@ async function processInbox(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
         `If you need to reply, call room_send_message with to = \"${message.from}\". Include your own agent id (${AGENT_ID}) when useful.`,
       ].join("\n");
 
-      if (ctx.isIdle()) pi.sendUserMessage(text);
-      else pi.sendUserMessage(text, { deliverAs: "followUp" });
+      const delivery = message.delivery ?? "followUp";
+      if (ctx.isIdle()) {
+        pi.sendUserMessage(text);
+      } else if (delivery === "steer") {
+        pi.sendUserMessage(text, { deliverAs: "steer" });
+      } else {
+        pi.sendUserMessage(text, { deliverAs: "followUp" });
+      }
       continue;
     }
 
@@ -836,15 +844,23 @@ export default function (pi: ExtensionAPI) {
 
         if (command === "send") {
           const to = rest[0];
-          const text = rest.slice(1).join(" ");
+          let text = rest.slice(1).join(" ");
+          let delivery: "steer" | "followUp" | undefined;
+          if (text.includes("--steer")) {
+            delivery = "steer";
+            text = text.replace(/--steer\b/g, "").trim();
+          } else if (text.includes("--follow-up")) {
+            delivery = "followUp";
+            text = text.replace(/--follow-up\b/g, "").trim();
+          }
           if (!to || !text) {
-            ctx.ui.notify("Usage: /room send <agent-id> <message>", "warning");
+            ctx.ui.notify("Usage: /room send <agent-id> <message> [--steer|--follow-up]", "warning");
             return;
           }
           const room = roomRequired();
-          const message = createUserMessage(room, to, text);
+          const message = createUserMessage(room, to, text, delivery);
           enqueueMessage(room, message);
-          ctx.ui.notify(`Queued message ${message.id} to ${to}`, "info");
+          ctx.ui.notify(`Queued message ${message.id} to ${to} (delivery: ${delivery ?? "followUp"})`, "info");
           return;
         }
 
@@ -868,7 +884,7 @@ export default function (pi: ExtensionAPI) {
           "/room leave [--keep-default]",
           "/room control on|off",
           "/room list [--stale]",
-          "/room send <agent-id> <message>",
+          "/room send <agent-id> <message> [--steer|--follow-up]",
           "/room whoami",
           "/room default <room|off>",
           "/room status",
@@ -968,18 +984,23 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use room_send_message to delegate to an idle room agent or report completion back to the requester.",
       "When delegating, include your agent id and ask the target to reply with room_send_message when done or blocked.",
+      "Use delivery=\"steer\" to urgently interrupt a busy agent that is doing something wrong. Use delivery=\"followUp\" (default) for normal messages that can wait.",
     ],
     parameters: Type.Object({
       to: Type.String({ description: "Target agent id from room_list_agents." }),
       message: Type.String({ description: "Message/task to deliver to the target agent." }),
+      delivery: Type.Optional(Type.Union([
+        Type.Literal("steer"),
+        Type.Literal("followUp"),
+      ], { description: "\"steer\" interrupts the target's current turn to deliver the message immediately. \"followUp\" (default) waits for the target to finish its current work." })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const room = roomRequired();
       writeSelf(ctx);
-      const message = createUserMessage(room, params.to, params.message);
+      const message = createUserMessage(room, params.to, params.message, params.delivery);
       enqueueMessage(room, message);
       return {
-        content: [{ type: "text", text: `Queued message ${message.id} to ${params.to} in room ${room}.` }],
+        content: [{ type: "text", text: `Queued message ${message.id} to ${params.to} in room ${room} (delivery: ${params.delivery ?? "followUp"}).` }],
         details: { room, message },
       };
     },

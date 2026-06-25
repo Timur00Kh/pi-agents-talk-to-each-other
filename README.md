@@ -159,6 +159,13 @@ agent-macbook-42109 tool tool:bash ctx:55% model:anthropic/claude cwd:/repo {"co
 
 Sends a prompt-like user message to another agent by id.
 
+Parameters:
+- `to`: target agent id
+- `message`: text to deliver
+- `delivery`: `"steer"` (interrupt target's current turn) or `"followUp"` (wait for target to finish, default)
+
+Use `delivery: "steer"` to urgently interrupt a busy agent that is doing something wrong. Use `delivery: "followUp"` (default) for normal messages that can wait.
+
 Recommended delegation pattern:
 
 > Do X. My agent id is `agent-...`. When done or blocked, call `room_send_message` back to me with the result.
