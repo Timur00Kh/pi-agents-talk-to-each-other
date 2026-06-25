@@ -12,7 +12,8 @@ The first version is intentionally simple: it uses a local file-based room bus u
   - `room_whoami`
   - `room_list_agents`
   - `room_send_message`
-  - `room_control_agent`
+  - `room_control_agent` (requires control permission)
+- **Permission model**: by default, `room_control_agent` is disabled for all agents. Enable it per-agent with `/room control on`.
 - Heartbeat/status for each agent:
   - agent id
   - idle/busy/tool/offline
@@ -21,8 +22,9 @@ The first version is intentionally simple: it uses a local file-based room bus u
   - model
   - current context usage when available
   - rough token totals when available
+  - control flag `[control]`
 - Follow-up delivery: if the target agent is busy, the received message is queued as a follow-up user message.
-- Basic session control messages: `compact`, `reload`, `new_session`.
+- Basic session control messages: `compact`, `reload`, `new_session` (only from agents with control enabled).
 
 ## Installation
 
@@ -66,6 +68,12 @@ List agents:
 /room list
 ```
 
+Enable control for the current agent (allows `room_control_agent`):
+
+```text
+/room control on
+```
+
 Show your own id/status:
 
 ```text
@@ -90,11 +98,40 @@ Leave the current room:
 /room connect <room> [--default]
 /room create <room> [--default]
 /room leave [--keep-default]
+/room control on|off
 /room list [--stale]
 /room send <agent-id> <message>
 /room whoami
 /room default <room|off>
 /room status
+```
+
+## Control permission
+
+By default, `room_control_agent` is **disabled** for all agents. This means:
+
+- Agents can always use `room_whoami`, `room_list_agents`, and `room_send_message`.
+- Agents **cannot** use `room_control_agent` (compact/reload/new_session on others) unless explicitly enabled.
+
+To enable control for the current agent:
+
+```text
+/room control on
+```
+
+To disable:
+
+```text
+/room control off
+```
+
+The control flag persists across `/reload` (same process). It does **not** persist across full restarts (new process = new agent id), so you must re-enable it after restarting Pi.
+
+Agents with control enabled are shown with `[control]` in `room_list_agents` output:
+
+```text
+agent-macbook-41841 idle [control] ctx:31% model:openai/gpt-5 cwd:/repo
+agent-macbook-42109 tool tool:bash ctx:55% model:anthropic/claude cwd:/repo
 ```
 
 ## Tools available to the model
@@ -112,7 +149,7 @@ Lists active agents in the current room.
 Example output:
 
 ```text
-agent-macbook-41841 idle ctx:31% model:openai/gpt-5 cwd:/repo
+agent-macbook-41841 idle [control] ctx:31% model:openai/gpt-5 cwd:/repo
 agent-macbook-42109 tool tool:bash ctx:55% model:anthropic/claude cwd:/repo {"command":"npm test"}
 ```
 
@@ -132,6 +169,8 @@ Queues one of these actions on another agent:
 - `reload`
 - `new_session`
 
+**Requires control permission.** If the agent does not have control enabled, the tool returns a permission error. Ask the user to run `/room control on`.
+
 Use sparingly. Normal coordination should use `room_send_message`.
 
 ## Storage layout
@@ -141,6 +180,8 @@ Runtime state is stored locally:
 ```text
 ~/.pi/agent/rooms/
   config.json
+  control/
+    <agent-id>.json          ← control permission flag
   <room>/
     agents/
       <agent-id>.json
@@ -150,19 +191,20 @@ Runtime state is stored locally:
     events.jsonl
 ```
 
-Message files are deleted after delivery. `agents/*.json` and `events.jsonl` are debug/runtime files and can be deleted if needed.
+Message files are deleted after delivery. `agents/*.json`, `control/*.json`, and `events.jsonl` are debug/runtime files and can be deleted if needed.
 
 ## Safety notes
 
 - This is local-machine coordination only; it does not authenticate senders.
-- Any Pi process that can write to `~/.pi/agent/rooms/<room>` can send messages/control events.
+- Any Pi process that can write to `~/.pi/agent/rooms/<room>` can send messages.
+- `room_control_agent` is gated by a per-agent control flag, but the flag file is not cryptographically protected.
 - Tool argument previews are masked/truncated, but do not treat room debug files as a secure audit log.
 - The extension never reads `.env` files or credentials by itself.
 
 ## Current limitations
 
 - File polling instead of a socket daemon.
-- No role model yet; all agents in a room have equal rights.
+- Control permission does not persist across full process restarts (new pid = new agent id).
 - No tree/fork orchestration yet.
 - No guaranteed exactly-once delivery across process crashes.
 

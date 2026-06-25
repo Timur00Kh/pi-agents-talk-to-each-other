@@ -6,7 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const EXTENSION_VERSION = "0.1.1";
+const EXTENSION_VERSION = "0.2.0";
 const HEARTBEAT_MS = 2_000;
 const INBOX_POLL_MS = 1_000;
 const ACTIVE_TTL_MS = 30_000;
@@ -45,6 +45,7 @@ interface AgentRecord {
   contextTokens?: number;
   contextPercent?: number;
   tokenTotals?: TokenTotals;
+  canControl: boolean;
   startedAt: number;
   lastSeen: number;
   version: string;
@@ -68,11 +69,13 @@ interface RuntimeState {
   status: AgentStatus;
   currentTool?: string;
   currentToolPreview?: string;
+  canControl: boolean;
   startedAt: number;
 }
 
 const state: RuntimeState = {
   status: "idle",
+  canControl: false,
   startedAt: Date.now(),
 };
 
@@ -86,6 +89,14 @@ function roomsRoot(): string {
 
 function configPath(): string {
   return path.join(roomsRoot(), "config.json");
+}
+
+function controlDir(): string {
+  return path.join(roomsRoot(), "control");
+}
+
+function controlFlagPath(agentId = AGENT_ID): string {
+  return path.join(controlDir(), `${agentId}.json`);
 }
 
 function sanitizeRoomName(room: string): string {
@@ -137,6 +148,21 @@ function readConfig(): RoomConfig {
 
 function writeConfig(config: RoomConfig): void {
   writeJsonAtomic(configPath(), config);
+}
+
+function readControlFlag(agentId = AGENT_ID): boolean {
+  return readJson<{ enabled: boolean }>(controlFlagPath(agentId))?.enabled ?? false;
+}
+
+function writeControlFlag(enabled: boolean, agentId = AGENT_ID): void {
+  if (enabled) writeJsonAtomic(controlFlagPath(agentId), { enabled: true, at: Date.now() });
+  else {
+    try {
+      fs.unlinkSync(controlFlagPath(agentId));
+    } catch {
+      // already gone
+    }
+  }
 }
 
 function makeId(prefix: string): string {
@@ -232,6 +258,7 @@ function currentRecord(ctx: ExtensionContext, statusOverride?: AgentStatus): Age
     contextTokens: tokens,
     contextPercent: percent,
     tokenTotals: tokenTotals(ctx),
+    canControl: state.canControl,
     startedAt: state.startedAt,
     lastSeen: Date.now(),
     version: EXTENSION_VERSION,
@@ -255,6 +282,7 @@ function writeOffline(room: string, ctx?: ExtensionContext): void {
       pid: process.pid,
       hostname,
       cwd: ctx?.cwd ?? process.cwd(),
+      canControl: state.canControl,
       startedAt: state.startedAt,
       version: EXTENSION_VERSION,
     }),
@@ -288,20 +316,13 @@ function listAgents(room: string, includeStale = false): AgentRecord[] {
   });
 }
 
-function formatAge(ms: number): string {
-  const seconds = Math.max(0, Math.round(ms / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  return `${Math.round(minutes / 60)}h`;
-}
-
 function formatAgent(record: AgentRecord): string {
+  const ctrl = record.canControl ? " [control]" : "";
   const ctx = record.contextPercent !== undefined ? ` ctx:${record.contextPercent}%` : record.contextTokens ? ` ctx:${record.contextTokens}` : "";
   const tool = record.currentTool ? ` tool:${record.currentTool}` : "";
   const preview = record.currentToolPreview ? ` ${record.currentToolPreview}` : "";
   const model = record.model ? ` model:${record.model}` : "";
-  return `${record.id} ${record.status}${tool}${ctx}${model} cwd:${record.cwd}${preview}`;
+  return `${record.id} ${record.status}${ctrl}${tool}${ctx}${model} cwd:${record.cwd}${preview}`;
 }
 
 function enqueueMessage(room: string, message: RoomMessage): void {
@@ -360,6 +381,7 @@ function connectToRoom(roomInput: string, ctx: ExtensionContext, setDefault: boo
     agentId: AGENT_ID,
     pid: process.pid,
     cwd: ctx.cwd,
+    canControl: state.canControl,
     at: Date.now(),
   });
 
@@ -419,6 +441,14 @@ function disconnect(ctx: ExtensionContext | undefined, markOffline: boolean, cle
 function roomRequired(): string {
   if (!state.room) throw new Error("This agent is not connected to a room. Run `/room connect <name>` first.");
   return state.room;
+}
+
+function controlRequired(): void {
+  if (!state.canControl) {
+    throw new Error(
+      "Control is not enabled for this agent. Run `/room control on` to enable room_control_agent.",
+    );
+  }
 }
 
 async function processInbox(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
@@ -488,11 +518,14 @@ export default function (pi: ExtensionAPI) {
   piRef = pi;
 
   pi.on("session_start", async (_event, ctx) => {
+    // Restore control permission from persistent flag file (survives reloads).
+    state.canControl = readControlFlag();
+
     const defaultRoom = readConfig().defaultRoom;
     if (defaultRoom) {
       try {
         const room = connectToRoom(defaultRoom, ctx, false);
-        ctx.ui.setStatus?.("agent-room", `room:${room}`);
+        ctx.ui.setStatus?.("agent-room", `room:${room}${state.canControl ? " [control]" : ""}`);
       } catch (error) {
         ctx.ui.notify?.(`Agent room auto-connect failed: ${(error as Error).message}`, "warning");
       }
@@ -546,8 +579,8 @@ export default function (pi: ExtensionAPI) {
           }
           const setDefault = rest.includes("--default");
           const room = connectToRoom(roomName, ctx, setDefault);
-          ctx.ui.setStatus?.("agent-room", `room:${room}`);
-          ctx.ui.notify(`Connected to room '${room}' as ${AGENT_ID}${setDefault ? " (saved as default)" : ""}`, "info");
+          ctx.ui.setStatus?.("agent-room", `room:${room}${state.canControl ? " [control]" : ""}`);
+          ctx.ui.notify(`Connected to room '${room}' as ${AGENT_ID}${setDefault ? " (saved as default)" : ""}${state.canControl ? " [control]" : ""}`, "info");
           return;
         }
 
@@ -556,6 +589,28 @@ export default function (pi: ExtensionAPI) {
           disconnect(ctx, true, !keepDefault);
           ctx.ui.setStatus?.("agent-room", "room:-");
           ctx.ui.notify(`Left room${keepDefault ? " (default kept)" : ""}`, "info");
+          return;
+        }
+
+        if (command === "control") {
+          const action = rest[0]?.toLowerCase();
+          if (action === "on" || action === "enable") {
+            state.canControl = true;
+            writeControlFlag(true);
+            if (state.room) writeSelf(ctx);
+            ctx.ui.setStatus?.("agent-room", `room:${state.room ?? "-"} [control]`);
+            ctx.ui.notify(`Control enabled for ${AGENT_ID}. room_control_agent is now available.`, "info");
+            return;
+          }
+          if (action === "off" || action === "disable") {
+            state.canControl = false;
+            writeControlFlag(false);
+            if (state.room) writeSelf(ctx);
+            ctx.ui.setStatus?.("agent-room", `room:${state.room ?? "-"}`);
+            ctx.ui.notify(`Control disabled for ${AGENT_ID}. room_control_agent is now blocked.`, "info");
+            return;
+          }
+          ctx.ui.notify("Usage: /room control on|off", "warning");
           return;
         }
 
@@ -578,7 +633,10 @@ export default function (pi: ExtensionAPI) {
         if (command === "whoami") {
           writeSelf(ctx);
           const record = state.room ? readJson<AgentRecord>(agentFile(state.room)) : undefined;
-          ctx.ui.notify(record ? JSON.stringify(record, null, 2) : `Not connected. Agent id: ${AGENT_ID}`, "info");
+          const summary = record
+            ? JSON.stringify(record, null, 2)
+            : `Not connected. Agent id: ${AGENT_ID}\nControl: ${state.canControl ? "enabled" : "disabled"}`;
+          ctx.ui.notify(summary, "info");
           return;
         }
 
@@ -610,6 +668,7 @@ export default function (pi: ExtensionAPI) {
             `Agent: ${AGENT_ID}`,
             `Current room: ${state.room ?? "not connected"}`,
             `Default room: ${config.defaultRoom ?? "not set"}`,
+            `Control: ${state.canControl ? "enabled" : "disabled"}`,
             state.room ? `Active agents: ${listAgents(state.room).length}` : undefined,
           ].filter(Boolean).join("\n");
           ctx.ui.notify(text, "info");
@@ -621,10 +680,12 @@ export default function (pi: ExtensionAPI) {
           "/room connect <room> [--default]",
           "/room create <room> [--default]",
           "/room leave [--keep-default]",
+          "/room control on|off",
           "/room list [--stale]",
           "/room send <agent-id> <message>",
           "/room whoami",
           "/room default <room|off>",
+          "/room status",
         ].join("\n"), "info");
       } catch (error) {
         ctx.ui.notify((error as Error).message, "error");
@@ -679,6 +740,7 @@ export default function (pi: ExtensionAPI) {
         id: AGENT_ID,
         room: state.room ?? null,
         status: state.room ? state.status : "not_connected",
+        canControl: state.canControl,
         cwd: ctx.cwd,
       };
       return {
@@ -691,10 +753,11 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "room_list_agents",
     label: "Room List Agents",
-    description: "List active agents in the current room with status, current tool, cwd, model, and context usage.",
+    description: "List active agents in the current room with status, current tool, cwd, model, context usage, and control flag.",
     promptSnippet: "List local Pi agents connected to the same room and see whether they are idle or busy.",
     promptGuidelines: [
       "Use room_list_agents before delegating work to find an idle target agent id.",
+      "Agents marked [control] can use room_control_agent on others.",
       "room_list_agents may show tool previews; treat them as debug hints, not complete logs.",
     ],
     parameters: Type.Object({
@@ -739,11 +802,11 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "room_control_agent",
     label: "Room Control Agent",
-    description: "Ask another room agent extension to run a local session control action: compact, reload, or new_session.",
-    promptSnippet: "Request compact/reload/new_session on another room agent.",
+    description: "Ask another room agent extension to run a local session control action: compact, reload, or new_session. Requires control to be enabled on this agent via `/room control on`.",
+    promptSnippet: "Request compact/reload/new_session on another room agent. Requires /room control on.",
     promptGuidelines: [
       "Use room_control_agent sparingly; prefer room_send_message for normal delegation.",
-      "Do not call room_control_agent unless the user or coordinating agent explicitly needs session control.",
+      "room_control_agent requires control permission. If it returns a permission error, ask the user to run `/room control on`.",
     ],
     parameters: Type.Object({
       to: Type.String({ description: "Target agent id from room_list_agents." }),
@@ -757,6 +820,15 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const room = roomRequired();
+      try {
+        controlRequired();
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `Permission denied: ${(error as Error).message}` }],
+          details: { room, denied: true },
+          isError: true,
+        };
+      }
       writeSelf(ctx);
       const message = createControlMessage(room, params.to, params.action as ControlAction, params.instructions, params.kickoff);
       enqueueMessage(room, message);
