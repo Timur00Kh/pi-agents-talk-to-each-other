@@ -2,11 +2,12 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { spawn } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const EXTENSION_VERSION = "0.2.0";
+const EXTENSION_VERSION = "0.3.0";
 const HEARTBEAT_MS = 2_000;
 const INBOX_POLL_MS = 1_000;
 const ACTIVE_TTL_MS = 30_000;
@@ -512,6 +513,191 @@ async function processInbox(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
   }
 }
 
+// ── Session reading helpers ──────────────────────────────────────────
+
+interface SessionEntry {
+  type: string;
+  id?: string;
+  parentId?: string | null;
+  timestamp?: string;
+  message?: any;
+  summary?: string;
+  customType?: string;
+  content?: any;
+  [key: string]: any;
+}
+
+function readSessionEntries(sessionFile: string): SessionEntry[] {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(sessionFile, "utf8");
+  } catch {
+    return [];
+  }
+  const entries: SessionEntry[] = [];
+  for (const line of raw.trim().split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      entries.push(JSON.parse(line) as SessionEntry);
+    } catch {
+      // skip malformed lines
+    }
+  }
+  return entries;
+}
+
+function formatEntryForHistory(entry: SessionEntry, maxChars = 500): string | null {
+  if (entry.type === "session") return null;
+  if (entry.type === "message" && entry.message) {
+    const msg = entry.message;
+    const role = msg.role ?? "unknown";
+    let body: string;
+    if (typeof msg.content === "string") {
+      body = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      const parts: string[] = [];
+      for (const part of msg.content) {
+        if (part.type === "text") parts.push(part.text ?? "");
+        else if (part.type === "toolCall") {
+          const argPreview = JSON.stringify(part.arguments ?? {}).slice(0, 120);
+          parts.push(`[toolCall: ${part.name}(${argPreview})]`);
+        } else if (part.type === "thinking") {
+          // skip thinking blocks in history
+        } else if (part.type === "image") {
+          parts.push("[image]");
+        }
+      }
+      body = parts.join(" ").trim();
+    } else {
+      body = JSON.stringify(msg.content ?? "");
+    }
+    if (!body) return null;
+    const truncated = body.length > maxChars ? `${body.slice(0, maxChars)}…` : body;
+    return `[${role}] ${truncated}`;
+  }
+  if (entry.type === "compaction") {
+    return `[compaction] ${truncate(entry.summary ?? "", maxChars)}`;
+  }
+  if (entry.type === "branch_summary") {
+    return `[branchSummary] ${truncate(entry.summary ?? "", maxChars)}`;
+  }
+  if (entry.type === "custom_message") {
+    const text = typeof entry.content === "string" ? entry.content : "";
+    return `[custom:${entry.customType ?? "?"}] ${truncate(text, maxChars)}`;
+  }
+  if (entry.type === "model_change") {
+    return `[model_change] ${entry.provider ?? "?"}/${entry.modelId ?? "?"}`;
+  }
+  return null;
+}
+
+function getTargetSessionFile(room: string, targetAgentId: string): string | undefined {
+  const record = readJson<AgentRecord>(agentFile(room, targetAgentId));
+  return record?.sessionFile;
+}
+
+function getPiInvocation(args: string[]): { command: string; args: string[] } {
+  const currentScript = process.argv[1];
+  const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
+  if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
+    return { command: process.execPath, args: [currentScript, ...args] };
+  }
+  const execName = path.basename(process.execPath).toLowerCase();
+  const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
+  if (!isGenericRuntime) {
+    return { command: process.execPath, args };
+  }
+  return { command: "pi", args };
+}
+
+async function runSummarization(
+  transcript: string,
+  systemPrompt: string,
+  model: string | undefined,
+  cwd: string,
+  signal: AbortSignal | undefined,
+): Promise<{ output: string; error?: string; exitCode: number }> {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-room-summarize-"));
+  const promptFile = path.join(tmpDir, "prompt.md");
+  try {
+    await fs.promises.writeFile(promptFile, systemPrompt, { encoding: "utf8", mode: 0o600 });
+
+    const piArgs: string[] = ["--mode", "json", "-p", "--no-session"];
+    if (model) piArgs.push("--model", model);
+    piArgs.push("--append-system-prompt", promptFile);
+    piArgs.push(transcript);
+
+    const invocation = getPiInvocation(piArgs);
+
+    const result = await new Promise<{ output: string; error: string; exitCode: number }>((resolve) => {
+      const proc = spawn(invocation.command, invocation.args, {
+        cwd,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let stdout = "";
+      let stderr = "";
+      let finalText = "";
+
+      const processLine = (line: string) => {
+        if (!line.trim()) return;
+        try {
+          const event = JSON.parse(line);
+          if (event.type === "message_end" && event.message?.role === "assistant") {
+            const parts = event.message.content ?? [];
+            for (const part of parts) {
+              if (part.type === "text") finalText += part.text;
+            }
+          }
+        } catch {
+          // ignore non-JSON lines
+        }
+      };
+
+      let buffer = "";
+      proc.stdout.on("data", (data) => {
+        buffer += data.toString();
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) processLine(line);
+      });
+
+      proc.stderr.on("data", (data) => {
+        stderr += data.toString();
+      });
+
+      proc.on("close", (code) => {
+        if (buffer.trim()) processLine(buffer);
+        resolve({ output: finalText || "(no output)", error: stderr, exitCode: code ?? 0 });
+      });
+
+      proc.on("error", () => {
+        resolve({ output: "", error: "Failed to spawn pi subprocess", exitCode: 1 });
+      });
+
+      if (signal) {
+        const killProc = () => {
+          proc.kill("SIGTERM");
+          setTimeout(() => {
+            if (!proc.killed) proc.kill("SIGKILL");
+          }, 5000);
+        };
+        if (signal.aborted) killProc();
+        else signal.addEventListener("abort", killProc, { once: true });
+      }
+    });
+
+    return result;
+  } finally {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      // cleanup is best-effort
+    }
+  }
+}
+
 let piRef: ExtensionAPI | undefined;
 
 export default function (pi: ExtensionAPI) {
@@ -835,6 +1021,176 @@ export default function (pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: `Queued control ${params.action} (${message.id}) to ${params.to} in room ${room}.` }],
         details: { room, control: message },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "room_read_agent_history",
+    label: "Room Read Agent History",
+    description: "Read the last (or first) N lines of another agent's session transcript. Requires control permission. Use to inspect what a subordinate agent has been doing before deciding to abort, compact, or intervene.",
+    promptSnippet: "Read another agent's recent session history. Requires /room control on.",
+    promptGuidelines: [
+      "Use room_read_agent_history to inspect what a subordinate agent has been doing before deciding to intervene.",
+      "room_read_agent_history requires control permission. If denied, ask the user to run `/room control on`.",
+    ],
+    parameters: Type.Object({
+      to: Type.String({ description: "Target agent id from room_list_agents." }),
+      lines: Type.Optional(Type.Number({ description: "Number of lines to return. Default 50.", default: 50 })),
+      mode: Type.Optional(Type.Union([
+        Type.Literal("tail"),
+        Type.Literal("head"),
+      ], { description: "\"tail\" = last N lines (default), \"head\" = first N lines." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const room = roomRequired();
+      try {
+        controlRequired();
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `Permission denied: ${(error as Error).message}` }],
+          details: { room, denied: true },
+          isError: true,
+        };
+      }
+      writeSelf(ctx);
+
+      const sessionFile = getTargetSessionFile(room, params.to);
+      if (!sessionFile) {
+        return {
+          content: [{ type: "text", text: `Agent ${params.to} has no session file (possibly in-memory or offline).` }],
+          details: { room, target: params.to, error: "no_session_file" },
+          isError: true,
+        };
+      }
+
+      const entries = readSessionEntries(sessionFile);
+      const formatted = entries
+        .map((e) => formatEntryForHistory(e))
+        .filter((s): s is string => s !== null);
+
+      const count = Math.max(1, Math.min(params.lines ?? 50, 500));
+      const mode = params.mode ?? "tail";
+      const slice = mode === "head" ? formatted.slice(0, count) : formatted.slice(-count);
+
+      return {
+        content: [{ type: "text", text: slice.join("\n") || "(empty session)" }],
+        details: { room, target: params.to, sessionFile, mode, linesRequested: count, linesReturned: slice.length, totalEntries: formatted.length },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "room_summarize_agent",
+    label: "Room Summarize Agent",
+    description: "Read the last N turns of another agent's session, send them through a model with a custom system prompt, and return the summary. Requires control permission. Use to get a compressed view of what a subordinate agent has been doing.",
+    promptSnippet: "Summarize another agent's recent session via a model. Requires /room control on.",
+    promptGuidelines: [
+      "Use room_summarize_agent when you need a compact view of a subordinate agent's activity, not raw history lines.",
+      "Provide a focused systemPrompt describing what to extract (e.g., 'Summarize what files were changed and any errors encountered').",
+      "Optionally specify a cheaper/faster model for summarization (e.g., 'claude-haiku-4-5'). Defaults to the target agent's model.",
+      "room_summarize_agent requires control permission. If denied, ask the user to run `/room control on`.",
+    ],
+    parameters: Type.Object({
+      to: Type.String({ description: "Target agent id from room_list_agents." }),
+      turns: Type.Optional(Type.Number({ description: "Number of last turns to include. A turn = one user message + assistant response + tool results. Default 10.", default: 10 })),
+      systemPrompt: Type.String({ description: "System prompt for the summarization model. Describe what to extract or focus on." }),
+      model: Type.Optional(Type.String({ description: "Model to use for summarization (e.g., 'claude-haiku-4-5'). Defaults to target agent's model." })),
+    }),
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const room = roomRequired();
+      try {
+        controlRequired();
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `Permission denied: ${(error as Error).message}` }],
+          details: { room, denied: true },
+          isError: true,
+        };
+      }
+      writeSelf(ctx);
+
+      const sessionFile = getTargetSessionFile(room, params.to);
+      if (!sessionFile) {
+        return {
+          content: [{ type: "text", text: `Agent ${params.to} has no session file (possibly in-memory or offline).` }],
+          details: { room, target: params.to, error: "no_session_file" },
+          isError: true,
+        };
+      }
+
+      const entries = readSessionEntries(sessionFile);
+
+      // Collect message entries and group into turns.
+      // A turn starts at a user message and includes everything until the next user message.
+      const messageEntries = entries.filter((e) => e.type === "message" && e.message);
+      const turns: SessionEntry[][] = [];
+      let currentTurn: SessionEntry[] = [];
+
+      for (const entry of messageEntries) {
+        if (entry.message.role === "user" && currentTurn.length > 0) {
+          turns.push(currentTurn);
+          currentTurn = [];
+        }
+        currentTurn.push(entry);
+      }
+      if (currentTurn.length > 0) turns.push(currentTurn);
+
+      const turnsToTake = Math.max(1, Math.min(params.turns ?? 10, 50));
+      const selectedTurns = turns.slice(-turnsToTake);
+
+      // Build a readable transcript
+      const transcriptLines: string[] = [
+        `Summarize the following conversation transcript from agent ${params.to}.`,
+        `Total turns in transcript: ${selectedTurns.length} (of ${turns.length} total).`,
+        "",
+      ];
+
+      for (const turnEntries of selectedTurns) {
+        for (const entry of turnEntries) {
+          const line = formatEntryForHistory(entry, 1000);
+          if (line) transcriptLines.push(line);
+        }
+      }
+
+      const transcript = transcriptLines.join("\n");
+
+      // Determine model: explicit param > target agent's model
+      const targetRecord = readJson<AgentRecord>(agentFile(room, params.to));
+      const model = params.model ?? targetRecord?.model;
+
+      const targetCwd = targetRecord?.cwd ?? ctx.cwd;
+
+      const result = await runSummarization(
+        transcript,
+        params.systemPrompt,
+        model,
+        targetCwd,
+        signal,
+      );
+
+      if (result.exitCode !== 0 && !result.output) {
+        return {
+          content: [{ type: "text", text: `Summarization failed (exit ${result.exitCode}): ${result.error || result.output}` }],
+          details: { room, target: params.to, sessionFile, model, turns: turnsToTake, totalTurns: turns.length, error: result.error },
+          isError: true,
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: result.output }],
+        details: {
+          room,
+          target: params.to,
+          sessionFile,
+          model: model ?? "default",
+          turnsRequested: turnsToTake,
+          turnsAvailable: turns.length,
+          turnsUsed: selectedTurns.length,
+          transcriptLength: transcript.length,
+          summaryLength: result.output.length,
+          stderr: result.error || undefined,
+        },
       };
     },
   });

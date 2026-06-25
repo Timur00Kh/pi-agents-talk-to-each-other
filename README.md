@@ -13,6 +13,8 @@ The first version is intentionally simple: it uses a local file-based room bus u
   - `room_list_agents`
   - `room_send_message`
   - `room_control_agent` (requires control permission)
+  - `room_read_agent_history` (requires control permission)
+  - `room_summarize_agent` (requires control permission)
 - **Permission model**: by default, `room_control_agent` is disabled for all agents. Enable it per-agent with `/room control on`.
 - Heartbeat/status for each agent:
   - agent id
@@ -172,6 +174,31 @@ Queues one of these actions on another agent:
 **Requires control permission.** If the agent does not have control enabled, the tool returns a permission error. Ask the user to run `/room control on`.
 
 Use sparingly. Normal coordination should use `room_send_message`.
+
+### `room_read_agent_history`
+
+Reads the last (or first) N lines of another agent's session transcript.
+
+Parameters:
+- `to`: target agent id
+- `lines`: number of lines to return (default 50, max 500)
+- `mode`: `"tail"` (last N, default) or `"head"` (first N)
+
+**Requires control permission.** Use this to inspect what a subordinate agent has been doing before deciding to intervene.
+
+### `room_summarize_agent`
+
+Reads the last N turns of another agent's session, sends them through a model with a custom system prompt, and returns the summary.
+
+Parameters:
+- `to`: target agent id
+- `turns`: number of last turns to include (default 10, max 50). A turn = one user message + assistant response + tool results.
+- `systemPrompt`: instructions for the summarization model (e.g., "Summarize what files were changed and any errors encountered")
+- `model`: model to use for summarization (optional, defaults to target agent's model)
+
+**Requires control permission.** Use this to get a compressed view of a subordinate agent's activity without reading raw history lines.
+
+The summarization runs as a separate `pi` subprocess in print mode with the specified model and system prompt. The transcript is built from the target agent's session file and passed as the task prompt.
 
 ## Storage layout
 
