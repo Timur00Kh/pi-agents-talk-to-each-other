@@ -6,7 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const EXTENSION_VERSION = "0.1.0";
+const EXTENSION_VERSION = "0.1.1";
 const HEARTBEAT_MS = 2_000;
 const INBOX_POLL_MS = 1_000;
 const ACTIVE_TTL_MS = 30_000;
@@ -541,10 +541,10 @@ export default function (pi: ExtensionAPI) {
         if (command === "create" || command === "connect") {
           const roomName = rest[0];
           if (!roomName) {
-            ctx.ui.notify("Usage: /room connect <room> [--no-default]", "warning");
+            ctx.ui.notify("Usage: /room connect <room> [--default]", "warning");
             return;
           }
-          const setDefault = !rest.includes("--no-default");
+          const setDefault = rest.includes("--default");
           const room = connectToRoom(roomName, ctx, setDefault);
           ctx.ui.setStatus?.("agent-room", `room:${room}`);
           ctx.ui.notify(`Connected to room '${room}' as ${AGENT_ID}${setDefault ? " (saved as default)" : ""}`, "info");
@@ -618,8 +618,8 @@ export default function (pi: ExtensionAPI) {
 
         ctx.ui.notify([
           "Usage:",
-          "/room connect <room> [--no-default]",
-          "/room create <room>",
+          "/room connect <room> [--default]",
+          "/room create <room> [--default]",
           "/room leave [--keep-default]",
           "/room list [--stale]",
           "/room send <agent-id> <message>",

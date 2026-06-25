@@ -50,7 +50,15 @@ Open two or more Pi sessions and connect them to the same room:
 /room connect dev
 ```
 
-`/room connect` saves the room as the default. Future Pi sessions auto-connect to that room on startup.
+`/room connect` only connects the current Pi process. New Pi sessions do not auto-connect by default.
+
+If you explicitly want future Pi sessions to auto-connect, use either:
+
+```text
+/room connect dev --default
+# or
+/room default dev
+```
 
 List agents:
 
@@ -70,7 +78,7 @@ Send a manual message:
 /room send agent-myhost-12345 Please inspect the failing tests. Reply to my agent id when done.
 ```
 
-Clear the default room and leave:
+Leave the current room:
 
 ```text
 /room leave
@@ -79,8 +87,8 @@ Clear the default room and leave:
 ## Slash commands
 
 ```text
-/room connect <room> [--no-default]
-/room create <room>
+/room connect <room> [--default]
+/room create <room> [--default]
 /room leave [--keep-default]
 /room list [--stale]
 /room send <agent-id> <message>
