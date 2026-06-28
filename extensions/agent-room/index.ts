@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const EXTENSION_VERSION = "0.3.1";
+const EXTENSION_VERSION = "0.4.0";
 const HEARTBEAT_MS = 2_000;
 const INBOX_POLL_MS = 1_000;
 const ACTIVE_TTL_MS = 30_000;
@@ -17,7 +17,7 @@ const hostname = os.hostname().replace(/[^a-zA-Z0-9_.-]+/g, "-");
 const AGENT_ID = `agent-${hostname}-${process.pid}`;
 
 type AgentStatus = "idle" | "busy" | "tool" | "offline";
-type ControlAction = "compact" | "reload" | "new_session";
+type ControlAction = "compact" | "reload" | "new_session" | "abort";
 
 interface RoomConfig {
   defaultRoom?: string;
@@ -505,7 +505,10 @@ async function processInbox(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
     }
 
     if (message.kind === "control") {
-      if (message.action === "compact") {
+      if (message.action === "abort") {
+        ctx.abort();
+        if (ctx.hasUI) ctx.ui.notify?.(`Room control abort from ${message.from} (${message.id})`, "warning");
+      } else if (message.action === "compact") {
         ctx.compact({
           customInstructions: message.instructions,
           onComplete: () => ctx.ui.notify?.(`Room control compact completed (${message.id})`, "info"),
@@ -1009,19 +1012,21 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "room_control_agent",
     label: "Room Control Agent",
-    description: "Ask another room agent extension to run a local session control action: compact, reload, or new_session. Requires control to be enabled on this agent via `/room control on`.",
-    promptSnippet: "Request compact/reload/new_session on another room agent. Requires /room control on.",
+    description: "Ask another room agent extension to run a local session control action: abort, compact, reload, or new_session. Requires control to be enabled on this agent via `/room control on`.",
+    promptSnippet: "Request abort/compact/reload/new_session on another room agent. Requires /room control on.",
     promptGuidelines: [
       "Use room_control_agent sparingly; prefer room_send_message for normal delegation.",
+      "Use action=\"abort\" to immediately cancel the target agent's current turn (like pressing Escape). This works even if the target is mid-tool-call.",
       "room_control_agent requires control permission. If it returns a permission error, ask the user to run `/room control on`.",
     ],
     parameters: Type.Object({
       to: Type.String({ description: "Target agent id from room_list_agents." }),
       action: Type.Union([
+        Type.Literal("abort"),
         Type.Literal("compact"),
         Type.Literal("reload"),
         Type.Literal("new_session"),
-      ], { description: "Control action to run on the target agent." }),
+      ], { description: "Control action to run on the target agent. \"abort\" cancels the current turn immediately." }),
       instructions: Type.Optional(Type.String({ description: "Optional compaction instructions." })),
       kickoff: Type.Optional(Type.String({ description: "Optional first prompt after new_session." })),
     }),

@@ -177,10 +177,11 @@ Queues one of these actions on another agent:
 - `compact`
 - `reload`
 - `new_session`
+- `abort` (immediately cancels the target agent's current turn, like pressing Escape)
 
 **Requires control permission.** If the agent does not have control enabled, the tool returns a permission error. Ask the user to run `/room control on`.
 
-Use sparingly. Normal coordination should use `room_send_message`.
+Use sparingly. Normal coordination should use `room_send_message`. Use `abort` when a subordinate agent is doing something wrong and you need to stop it immediately, without waiting for the current tool call to finish.
 
 ### `room_read_agent_history`
 
