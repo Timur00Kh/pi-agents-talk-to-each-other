@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const EXTENSION_VERSION = "0.4.0";
+const EXTENSION_VERSION = "0.5.0";
 const HEARTBEAT_MS = 2_000;
 const INBOX_POLL_MS = 1_000;
 const ACTIVE_TTL_MS = 30_000;
@@ -709,6 +709,190 @@ async function runSummarization(
   }
 }
 
+// ── Room discovery & TUI browser ──────────────────────────────────────────
+
+interface RoomInfo {
+  name: string;
+  agentCount: number;
+  isDefault: boolean;
+  isCurrent: boolean;
+}
+
+function discoverRooms(): RoomInfo[] {
+  const root = roomsRoot();
+  const config = readConfig();
+  const rooms: RoomInfo[] = [];
+
+  if (!fs.existsSync(root)) return rooms;
+
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const roomName = entry.name;
+    const aDir = agentsDir(roomName);
+    let agentCount = 0;
+    if (fs.existsSync(aDir)) {
+      const now = Date.now();
+      for (const f of fs.readdirSync(aDir)) {
+        if (!f.endsWith(".json")) continue;
+        const record = readJson<AgentRecord>(path.join(aDir, f));
+        if (!record) continue;
+        if (record.status === "offline") continue;
+        if (now - record.lastSeen > ACTIVE_TTL_MS) continue;
+        agentCount++;
+      }
+    }
+    rooms.push({
+      name: roomName,
+      agentCount,
+      isDefault: config.defaultRoom === roomName,
+      isCurrent: state.room === roomName,
+    });
+  }
+
+  // Sort: current room first, then by agent count descending, then by name
+  rooms.sort((a, b) => {
+    if (a.isCurrent) return -1;
+    if (b.isCurrent) return 1;
+    if (b.agentCount !== a.agentCount) return b.agentCount - a.agentCount;
+    return a.name.localeCompare(b.name);
+  });
+
+  return rooms;
+}
+
+async function roomBrowser(ctx: ExtensionContext): Promise<void> {
+  if (!ctx.hasUI) {
+    ctx.ui.notify("TUI browser requires interactive mode", "warning");
+    return;
+  }
+
+  // ── Main room list ──
+  const rooms = discoverRooms();
+  const config = readConfig();
+
+  const roomOptions: string[] = [];
+  if (state.room) {
+    roomOptions.push(`Control: ${state.canControl ? "ON ✓" : "OFF"} — toggle`);
+  }
+  roomOptions.push("✚ Create new room");
+  for (const r of rooms) {
+    const markers = [
+      r.isCurrent ? "[current]" : null,
+      r.isDefault ? "[default]" : null,
+    ].filter(Boolean).join(" ");
+    roomOptions.push(`${r.name}  ${r.agentCount} agent${r.agentCount === 1 ? "" : "s"}${markers ? ` ${markers}` : ""}`);
+  }
+  roomOptions.push("Cancel");
+
+  const choice = await ctx.ui.select("Agent Room — select a room or action:", roomOptions);
+  if (!choice || choice === "Cancel") return;
+
+  // ── Toggle control ──
+  if (choice.startsWith("Control:")) {
+    const action = state.canControl ? "off" : "on";
+    state.canControl = !state.canControl;
+    writeControlFlag(state.canControl);
+    if (state.room) writeSelf(ctx);
+    ctx.ui.setStatus?.("agent-room", `room:${state.room ?? "-"}${state.canControl ? " [control]" : ""}`);
+    ctx.ui.notify(`Control ${action.toUpperCase()} for ${AGENT_ID}`, "info");
+    return;
+  }
+
+  // ── Create new room ──
+  if (choice === "✚ Create new room") {
+    const name = await ctx.ui.input("Room name:", "my-room");
+    if (!name?.trim()) return;
+    try {
+      const room = connectToRoom(name.trim(), ctx, false);
+      ctx.ui.setStatus?.("agent-room", `room:${room}${state.canControl ? " [control]" : ""}`);
+      ctx.ui.notify(`Connected to room '${room}' as ${AGENT_ID}`, "info");
+    } catch (error) {
+      ctx.ui.notify((error as Error).message, "error");
+    }
+    return;
+  }
+
+  // ── Room selected — parse name and show action menu ──
+  const roomName = choice.split("  ")[0].trim();
+  const actions: string[] = [];
+
+  if (state.room === roomName) {
+    actions.push("Leave this room");
+  } else {
+    actions.push("Connect to this room");
+  }
+  actions.push("View agents (detailed)");
+  if (config.defaultRoom === roomName) {
+    actions.push("Remove as default");
+  } else {
+    actions.push("Set as default room");
+  }
+  actions.push("Back");
+
+  const action = await ctx.ui.select(`Room: ${roomName} (${rooms.find(r => r.name === roomName)?.agentCount ?? 0} agents)`, actions);
+  if (!action || action === "Back") {
+    return roomBrowser(ctx); // go back to room list
+  }
+
+  // ── Connect ──
+  if (action === "Connect to this room") {
+    try {
+      const room = connectToRoom(roomName, ctx, false);
+      ctx.ui.setStatus?.("agent-room", `room:${room}${state.canControl ? " [control]" : ""}`);
+      ctx.ui.notify(`Connected to room '${room}' as ${AGENT_ID}`, "info");
+    } catch (error) {
+      ctx.ui.notify((error as Error).message, "error");
+    }
+    return;
+  }
+
+  // ── Leave ──
+  if (action === "Leave this room") {
+    disconnect(ctx, true, false);
+    ctx.ui.setStatus?.("agent-room", "room:-");
+    ctx.ui.notify(`Left room '${roomName}'`, "info");
+    return;
+  }
+
+  // ── Set/Remove default ──
+  if (action === "Set as default room") {
+    writeConfig({ ...readConfig(), defaultRoom: roomName });
+    ctx.ui.notify(`Default room set to '${roomName}'`, "info");
+    return roomBrowser(ctx);
+  }
+  if (action === "Remove as default") {
+    const c = readConfig();
+    delete c.defaultRoom;
+    writeConfig(c);
+    ctx.ui.notify("Default room cleared", "info");
+    return roomBrowser(ctx);
+  }
+
+  // ── View agents ──
+  if (action === "View agents (detailed)") {
+    const agents = listAgents(roomName, false);
+    if (agents.length === 0) {
+      ctx.ui.notify("No active agents in this room", "info");
+      return roomBrowser(ctx);
+    }
+    const agentLines = agents.map((a) => {
+      const ctrl = a.canControl ? " [control]" : "";
+      const tool = a.currentTool ? ` tool:${a.currentTool}` : "";
+      const preview = a.currentToolPreview ? ` ${a.currentToolPreview.slice(0, 80)}` : "";
+      const ctxPct = a.contextPercent !== undefined ? ` ctx:${a.contextPercent}%` : "";
+      const model = a.model ? ` model:${a.model}` : "";
+      return `${a.id}  ${a.status}${ctrl}${tool}${ctxPct}${model}${preview ? `\n    ${preview}` : ""}`;
+    });
+    agentLines.push("Back");
+    const agentChoice = await ctx.ui.select(`Agents in '${roomName}':`, agentLines);
+    if (!agentChoice || agentChoice === "Back") {
+      return roomBrowser(ctx);
+    }
+    // If an agent was selected, show nothing extra for now — just go back
+    return roomBrowser(ctx);
+  }
+}
+
 let piRef: ExtensionAPI | undefined;
 
 export default function (pi: ExtensionAPI) {
@@ -765,9 +949,13 @@ export default function (pi: ExtensionAPI) {
     description: "Create/connect/list local Pi agent rooms",
     handler: async (args, ctx) => {
       const [commandRaw, ...rest] = args.trim().split(/\s+/).filter(Boolean);
-      const command = commandRaw ?? "status";
+      const command = commandRaw ?? "browser";
 
       try {
+        if (command === "browser" || command === "menu") {
+          await roomBrowser(ctx);
+          return;
+        }
         if (command === "create" || command === "connect") {
           const roomName = rest[0];
           if (!roomName) {
@@ -882,6 +1070,7 @@ export default function (pi: ExtensionAPI) {
 
         ctx.ui.notify([
           "Usage:",
+          "/room                         Open room browser (TUI)",
           "/room connect <room> [--default]",
           "/room create <room> [--default]",
           "/room leave [--keep-default]",

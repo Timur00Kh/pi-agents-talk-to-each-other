@@ -54,6 +54,14 @@ Open two or more Pi sessions and connect them to the same room:
 /room connect dev
 ```
 
+Or open the interactive room browser:
+
+```text
+/room
+```
+
+`/room` without arguments opens a TUI browser with room list, agent counts, and actions.
+
 `/room connect` only connects the current Pi process. New Pi sessions do not auto-connect by default.
 
 If you explicitly want future Pi sessions to auto-connect, use either:
@@ -96,7 +104,8 @@ Leave the current room:
 
 ## Slash commands
 
-```text
+:```text
+/room                         Open room browser (TUI)
 /room connect <room> [--default]
 /room create <room> [--default]
 /room leave [--keep-default]
