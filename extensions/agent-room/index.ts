@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const EXTENSION_VERSION = "0.5.2";
+const EXTENSION_VERSION = "0.5.3";
 const HEARTBEAT_MS = 2_000;
 const INBOX_POLL_MS = 1_000;
 const ACTIVE_TTL_MS = 30_000;
@@ -771,6 +771,22 @@ function discoverRooms(): RoomInfo[] {
   return rooms;
 }
 
+const SEP = "--- --- --- --- --- ---";
+
+function deleteRoom(room: string): void {
+  const dir = roomDir(room);
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // best effort
+  }
+  const config = readConfig();
+  if (config.defaultRoom === room) {
+    delete config.defaultRoom;
+    writeConfig(config);
+  }
+}
+
 async function roomBrowser(ctx: ExtensionContext): Promise<void> {
   if (!ctx.hasUI) {
     ctx.ui.notify("TUI browser requires interactive mode", "warning");
@@ -784,6 +800,7 @@ async function roomBrowser(ctx: ExtensionContext): Promise<void> {
   const roomOptions: string[] = [];
   if (state.room) {
     roomOptions.push(`Control: ${state.canControl ? "ON ✓" : "OFF"} — toggle`);
+    roomOptions.push(SEP);
   }
   roomOptions.push("✚ Create new room");
   for (const r of rooms) {
@@ -793,10 +810,12 @@ async function roomBrowser(ctx: ExtensionContext): Promise<void> {
     ].filter(Boolean).join(" ");
     roomOptions.push(`${r.name}  ${r.agentCount} agent${r.agentCount === 1 ? "" : "s"}${markers ? ` ${markers}` : ""}`);
   }
+  roomOptions.push(SEP);
   roomOptions.push("Cancel");
 
   const choice = await ctx.ui.select("Agent Room — select a room or action:", roomOptions);
   if (!choice || choice === "Cancel") return;
+  if (choice === SEP) return roomBrowser(ctx);
 
   // ── Toggle control ──
   if (choice.startsWith("Control:")) {
@@ -833,15 +852,18 @@ async function roomBrowser(ctx: ExtensionContext): Promise<void> {
     actions.push("Connect to this room");
   }
   actions.push("View agents (detailed)");
+  actions.push(SEP);
   if (config.defaultRoom === roomName) {
     actions.push("Remove as default");
   } else {
     actions.push("Set as default room");
   }
+  actions.push("Delete room");
+  actions.push(SEP);
   actions.push("Back");
 
   const action = await ctx.ui.select(`Room: ${roomName} (${rooms.find(r => r.name === roomName)?.agentCount ?? 0} agents)`, actions);
-  if (!action || action === "Back") {
+  if (!action || action === "Back" || action === SEP) {
     return roomBrowser(ctx); // go back to room list
   }
 
@@ -877,6 +899,21 @@ async function roomBrowser(ctx: ExtensionContext): Promise<void> {
     writeConfig(c);
     ctx.ui.notify("Default room cleared", "info");
     return roomBrowser(ctx);
+  }
+
+  // ── Delete room ──
+  if (action === "Delete room") {
+    const confirm = await ctx.ui.confirm("Delete room?", `Delete room '${roomName}' and all its data (agents, inbox, events)? This cannot be undone.`);
+    if (!confirm) {
+      return roomBrowser(ctx);
+    }
+    if (state.room === roomName) {
+      disconnect(ctx, true, false);
+      ctx.ui.setStatus?.("agent-room", "room:-");
+    }
+    deleteRoom(roomName);
+    ctx.ui.notify(`Room '${roomName}' deleted`, "info");
+    return;
   }
 
   // ── View agents ──
