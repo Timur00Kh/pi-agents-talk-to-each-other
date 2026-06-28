@@ -10,6 +10,10 @@
     "agent-room"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Timur00Kh/pi-agents-talk-to-each-other.git"
+  },
   "pi": {
     "extensions": [
       "./extensions/agent-room/index.ts"
