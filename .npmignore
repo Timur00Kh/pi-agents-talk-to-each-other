@@ -1,0 +1,8 @@
+.github/
+.git/
+.gitignore
+node_modules/
+*.log
+.DS_Store
+.pi/
+*.tmp
