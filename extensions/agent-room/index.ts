@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const EXTENSION_VERSION = "0.5.3";
+const EXTENSION_VERSION = "0.5.5";
 const HEARTBEAT_MS = 2_000;
 const INBOX_POLL_MS = 1_000;
 const ACTIVE_TTL_MS = 30_000;
@@ -369,6 +369,9 @@ function createControlMessage(
 
 function connectToRoom(roomInput: string, ctx: ExtensionContext, setDefault: boolean): string {
   const room = sanitizeRoomName(roomInput);
+  if (room === "control") {
+    throw new Error("'control' is a reserved room name and cannot be used.");
+  }
   if (state.room && state.room !== room) disconnect(ctx, true, false);
 
   state.room = room;
@@ -738,6 +741,7 @@ function discoverRooms(): RoomInfo[] {
 
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
+    if (entry.name === "control") continue; // skip control flag directory
     const roomName = entry.name;
     const aDir = agentsDir(roomName);
     let agentCount = 0;
