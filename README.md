@@ -245,10 +245,29 @@ Message files are deleted after delivery. `agents/*.json`, `control/*.json`, and
 - Tool argument previews are masked/truncated, but do not treat room debug files as a secure audit log.
 - The extension never reads `.env` files or credentials by itself.
 
+## Optional: cmux integration skill
+
+If you run your agents in [cmux](https://github.com/manaflow-ai/cmux) (native macOS terminal for parallel AI agents), you can install an optional skill that lets the controlling agent reload a worker agent or create a new session for it via terminal automation:
+
+```bash
+npx skills add Timur00Kh/pi-agents-talk-to-each-other -g -y
+```
+
+This installs the `cmux-room-reload` skill, which provides a workflow for:
+
+1. Asking the worker agent for its `CMUX_SURFACE_ID` via `room_send_message`
+2. Sending `/reload` or `/new` as keyboard input through `cmux send` (bypasses the `sendUserMessage` slash-command limitation)
+3. Reconnecting the worker agent to the room with `/room connect <room>`
+
+This skill is **optional** and not installed automatically with the extension. Install it only if you use cmux.
+
+See [`skills/cmux-room-reload/SKILL.md`](skills/cmux-room-reload/SKILL.md) for full instructions.
+
 ## Current limitations
 
 - File polling instead of a socket daemon.
 - Control permission does not persist across full process restarts (new pid = new agent id).
+- `reload` and `new_session` via `room_control_agent` are DEPRECATED — pi does not process slash commands from extension-injected messages. Use the optional cmux skill above as a workaround, or ask the user to run `/reload` or `/new` manually.
 - No tree/fork orchestration yet.
 - No guaranteed exactly-once delivery across process crashes.
 
