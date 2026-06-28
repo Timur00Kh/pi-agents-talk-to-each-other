@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const EXTENSION_VERSION = "0.5.0";
+const EXTENSION_VERSION = "0.5.1";
 const HEARTBEAT_MS = 2_000;
 const INBOX_POLL_MS = 1_000;
 const ACTIVE_TTL_MS = 30_000;
@@ -83,7 +83,6 @@ const state: RuntimeState = {
 
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let inboxTimer: ReturnType<typeof setInterval> | undefined;
-const pendingControls = new Map<string, RoomMessage>();
 
 function roomsRoot(): string {
   return path.join(getAgentDir(), "rooms");
@@ -514,11 +513,23 @@ async function processInbox(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
           onComplete: () => ctx.ui.notify?.(`Room control compact completed (${message.id})`, "info"),
           onError: (error) => ctx.ui.notify?.(`Room control compact failed: ${error.message}`, "error"),
         });
-      } else {
-        pendingControls.set(message.id, message);
-        const command = `/room-internal-control ${message.id}`;
-        if (ctx.isIdle()) pi.sendUserMessage(command);
-        else pi.sendUserMessage(command, { deliverAs: "followUp" });
+      } else if (message.action === "reload") {
+        if (ctx.hasUI) ctx.ui.notify?.(`Room control reload from ${message.from} (${message.id})`, "info");
+        if (ctx.isIdle()) pi.sendUserMessage("/reload");
+        else pi.sendUserMessage("/reload", { deliverAs: "followUp" });
+      } else if (message.action === "new_session") {
+        if (ctx.hasUI) ctx.ui.notify?.(`Room control new_session from ${message.from} (${message.id})`, "info");
+        if (ctx.isIdle()) {
+          pi.sendUserMessage("/new");
+          if (message.kickoff?.trim()) {
+            pi.sendUserMessage(message.kickoff.trim(), { deliverAs: "followUp" });
+          }
+        } else {
+          pi.sendUserMessage("/new", { deliverAs: "followUp" });
+          if (message.kickoff?.trim()) {
+            pi.sendUserMessage(message.kickoff.trim(), { deliverAs: "followUp" });
+          }
+        }
       }
     }
   }
@@ -1083,37 +1094,6 @@ export default function (pi: ExtensionAPI) {
         ].join("\n"), "info");
       } catch (error) {
         ctx.ui.notify((error as Error).message, "error");
-      }
-    },
-  });
-
-  pi.registerCommand("room-internal-control", {
-    description: "Internal command used by agent-room control messages",
-    handler: async (args, ctx) => {
-      const id = args.trim();
-      const message = pendingControls.get(id);
-      if (!message) {
-        ctx.ui.notify(`Missing room control payload: ${id}`, "warning");
-        return;
-      }
-      pendingControls.delete(id);
-
-      if (message.action === "reload") {
-        await ctx.waitForIdle();
-        await ctx.reload();
-        return;
-      }
-
-      if (message.action === "new_session") {
-        await ctx.waitForIdle();
-        const parentSession = ctx.sessionManager.getSessionFile() ?? undefined;
-        const kickoff = message.kickoff;
-        await ctx.newSession({
-          parentSession,
-          withSession: async (newCtx) => {
-            if (kickoff?.trim()) await newCtx.sendUserMessage(kickoff.trim());
-          },
-        });
       }
     },
   });
