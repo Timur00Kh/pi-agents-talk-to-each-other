@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const EXTENSION_VERSION = "0.5.1";
+const EXTENSION_VERSION = "0.5.2";
 const HEARTBEAT_MS = 2_000;
 const INBOX_POLL_MS = 1_000;
 const ACTIVE_TTL_MS = 30_000;
@@ -1181,11 +1181,13 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "room_control_agent",
     label: "Room Control Agent",
-    description: "Ask another room agent extension to run a local session control action: abort, compact, reload, or new_session. Requires control to be enabled on this agent via `/room control on`.",
-    promptSnippet: "Request abort/compact/reload/new_session on another room agent. Requires /room control on.",
+    description: "Ask another room agent extension to run a local session control action. Working actions: abort (cancel current turn), compact (compact context). DEPRECATED/not working: reload, new_session (pi does not process slash commands from extension-injected messages). Requires control to be enabled via `/room control on`.",
+    promptSnippet: "Request abort/compact on another room agent. reload/new_session deprecated. Requires /room control on.",
     promptGuidelines: [
       "Use room_control_agent sparingly; prefer room_send_message for normal delegation.",
       "Use action=\"abort\" to immediately cancel the target agent's current turn (like pressing Escape). This works even if the target is mid-tool-call.",
+      "Use action=\"compact\" to trigger context compaction on the target agent.",
+      "action=\"reload\" and action=\"new_session\" are DEPRECATED and do not work reliably. Ask the user to run /reload or /new manually instead.",
       "room_control_agent requires control permission. If it returns a permission error, ask the user to run `/room control on`.",
     ],
     parameters: Type.Object({
@@ -1195,7 +1197,7 @@ export default function (pi: ExtensionAPI) {
         Type.Literal("compact"),
         Type.Literal("reload"),
         Type.Literal("new_session"),
-      ], { description: "Control action to run on the target agent. \"abort\" cancels the current turn immediately." }),
+      ], { description: "Control action. \"abort\" cancels current turn (works). \"compact\" triggers compaction (works). \"reload\" and \"new_session\" are DEPRECATED — do not work, ask user to run /reload or /new manually." }),
       instructions: Type.Optional(Type.String({ description: "Optional compaction instructions." })),
       kickoff: Type.Optional(Type.String({ description: "Optional first prompt after new_session." })),
     }),
@@ -1210,6 +1212,15 @@ export default function (pi: ExtensionAPI) {
           isError: true,
         };
       }
+
+      if (params.action === "reload" || params.action === "new_session") {
+        return {
+          content: [{ type: "text", text: `${params.action} is DEPRECATED and does not work reliably. Ask the user to run /${params.action === "new_session" ? "new" : "reload"} on the target agent manually, or use room_send_message to ask the target agent to run it.` }],
+          details: { room, deprecated: true, action: params.action },
+          isError: true,
+        };
+      }
+
       writeSelf(ctx);
       const message = createControlMessage(room, params.to, params.action as ControlAction, params.instructions, params.kickoff);
       enqueueMessage(room, message);

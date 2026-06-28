@@ -183,14 +183,14 @@ Recommended delegation pattern:
 
 Queues one of these actions on another agent:
 
-- `compact`
-- `reload`
-- `new_session`
-- `abort` (immediately cancels the target agent's current turn, like pressing Escape)
+- `compact` (works)
+- `abort` (works — immediately cancels the target agent's current turn, like pressing Escape)
+- `reload` (**DEPRECATED** — does not work, pi does not process slash commands from extension-injected messages; ask the user to run `/reload` manually)
+- `new_session` (**DEPRECATED** — same reason; ask the user to run `/new` manually)
 
 **Requires control permission.** If the agent does not have control enabled, the tool returns a permission error. Ask the user to run `/room control on`.
 
-Use sparingly. Normal coordination should use `room_send_message`. Use `abort` when a subordinate agent is doing something wrong and you need to stop it immediately, without waiting for the current tool call to finish.
+Use `abort` when a subordinate agent is doing something wrong and you need to stop it immediately. Use `compact` to reduce context. For `reload` and `new_session`, ask the user to run them manually.
 
 ### `room_read_agent_history`
 
